@@ -1,13 +1,63 @@
 require('dotenv').config();
 
-const helmet = require('helmet');
-
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
+const helmet = require('helmet');
+const cors = require('cors');
 
 const app = express();
+
 app.use(helmet());
-app.use(express.json());
+
+app.use(cors({
+    origin: false
+}));
+
+app.use(express.json({ limit: '10kb' }));
+
+function isValidLicenseInput(value, maxLength) {
+    return typeof value === 'string' &&
+           value.trim().length > 0 &&
+           value.length <= maxLength;
+}
+
+// Security: Rate Limiting
+const activateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10,
+    message: {
+        success: false,
+        message: 'Too many activation attempts. Please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+
+const deactivateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 10,
+    message: {
+        success: false,
+        message: 'Too many deactivation attempts. Please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+
+const checkLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    message: {
+        success: false,
+        valid: false,
+        message: 'Too many license checks. Please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false
+});
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -19,24 +69,29 @@ app.get('/', (req, res) => {
     res.send('License API is working!');
 });
 
+
 // Activate License
-app.post('/activate', async (req, res) => {
+app.post('/activate', activateLimiter, async (req, res) => {
 
     try {
 
-        const { license_key, device_id, device_name } = req.body;
+        const { license_key, device_id, device_name, hardware_fingerprint } = req.body;
 
-        if (!license_key || !device_id) {
+        if (
+            !isValidLicenseInput(license_key, 100) ||
+            !isValidLicenseInput(device_id, 200) ||
+            !isValidLicenseInput(hardware_fingerprint, 128)
+        ) {
             return res.status(400).json({
                 success: false,
-                message: 'License key and device ID are required'
+                message: 'Invalid license request data'
             });
         }
 
         // Find license
         const { data: license, error: licenseError } = await supabase
             .from('licenses')
-            .select('*')
+            .select('id, license_key, status, expiry_date, max_devices, customer_name')
             .eq('license_key', license_key)
             .single();
 
@@ -75,103 +130,169 @@ app.post('/activate', async (req, res) => {
             }
         }
 
-        // Check existing device
-        const { data: existingDevice } = await supabase
-            .from('license_devices')
-            .select('*')
-            .eq('license_id', license.id)
-            .eq('device_id', device_id)
-            .maybeSingle();
+// Check existing device
+const { data: existingDevice } = await supabase
+    .from('license_devices')
+    .select('id, is_active, hardware_fingerprint')
+    .eq('license_id', license.id)
+    .eq('device_id', device_id)
+    .maybeSingle();
 
-        if (existingDevice) {
+if (existingDevice) {
 
-            await supabase
-                .from('license_devices')
-                .update({
-                    is_active: true,
-                    last_check: new Date().toISOString()
-                })
-                .eq('id', existingDevice.id);
+    // Device already active
+    if (existingDevice.is_active === true) {
 
-            return res.json({
-                success: true,
-                message: 'License already activated on this computer'
-            });
-        }
-
-        // Count active devices
-        const { data: devices } = await supabase
-            .from('license_devices')
-            .select('id')
-            .eq('license_id', license.id)
-            .eq('is_active', true);
-
-        const deviceCount = devices ? devices.length : 0;
-
-        if (deviceCount >= license.max_devices) {
+        // Hardware fingerprint must match
+        if (existingDevice.hardware_fingerprint !== hardware_fingerprint) {
             return res.status(403).json({
                 success: false,
-                message: 'Maximum device limit reached'
+                message: 'This license is already bound to another hardware configuration'
             });
         }
 
-        // Activate new device
-        const { error: insertError } = await supabase
-            .from('license_devices')
-            .insert({
-                license_id: license.id,
-                device_id: device_id,
-                device_name: device_name || null,
-                activated_at: new Date().toISOString(),
-                last_check: new Date().toISOString(),
-                is_active: true
-            });
-
-        if (insertError) {
-            return res.status(500).json({
-                success: false,
-                message: insertError.message
-            });
-        }
-
-        // Update license activation date
+        // Do NOT overwrite hardware fingerprint
         await supabase
-            .from('licenses')
+            .from('license_devices')
             .update({
-                activation_date: new Date().toISOString(),
                 last_check: new Date().toISOString()
             })
-            .eq('id', license.id);
+            .eq('id', existingDevice.id);
 
-        res.json({
+        return res.json({
             success: true,
-            message: 'License activated successfully',
-            expiry_date: license.expiry_date
+            message: 'License already activated on this computer'
         });
+    }
 
+    // Previously deactivated device
+    if (existingDevice.hardware_fingerprint !== hardware_fingerprint) {
+        return res.status(403).json({
+            success: false,
+            message: 'Hardware does not match the original activated computer'
+        });
+    }
+
+    const { error: reactivateError } = await supabase
+    .from('license_devices')
+    .update({
+        is_active: true,
+        last_check: new Date().toISOString()
+    })
+    .eq('id', existingDevice.id);
+
+if (reactivateError) {
+    console.error('DEVICE REACTIVATION ERROR:', reactivateError);
+
+    if (reactivateError.message &&
+        reactivateError.message.includes('MAX_DEVICES_REACHED')) {
+        return res.status(403).json({
+            success: false,
+            message: 'Maximum device limit reached'
+        });
+    }
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to reactivate license'
+    });
+}
+
+return res.json({
+    success: true,
+    message: 'License reactivated successfully'
+});
+}
+    // Check device limit
+const { count: activeDeviceCount, error: countError } = await supabase
+    .from('license_devices')
+    .select('*', { count: 'exact', head: true })
+    .eq('license_id', license.id)
+    .eq('is_active', true);
+
+if (countError) {
+    console.error('DEVICE COUNT ERROR:', countError);
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to verify device limit'
+    });
+}
+
+if (activeDeviceCount >= license.max_devices) {
+    return res.status(403).json({
+        success: false,
+        message: 'Maximum device limit reached'
+    });
+}
+
+
+// Add new device
+const { error: insertError } = await supabase
+    .from('license_devices')
+    .insert([{
+        license_id: license.id,
+        device_id: device_id,
+        device_name: device_name || 'Unknown Device',
+        hardware_fingerprint: hardware_fingerprint,
+        is_active: true,
+        last_check: new Date().toISOString()
+    }]);
+
+if (insertError) {
+
+    console.error('DEVICE INSERT ERROR:', insertError);
+
+    // Database trigger: maximum device limit reached
+    if (insertError.message &&
+        insertError.message.includes('MAX_DEVICES_REACHED')) {
+
+        return res.status(403).json({
+            success: false,
+            message: 'Maximum device limit reached'
+        });
+    }
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to activate license'
+    });
+}
+
+return res.json({
+    success: true,
+    message: 'License activated successfully'
+});
+    
     } catch (err) {
 
-        res.status(500).json({
-            success: false,
-            message: err.message
-        });
+    console.error('ACTIVATE ERROR:', err);
+
+    return res.status(500).json({
+        success: false,
+        message: 'Server error'
+    });
 
     }
 });
 
 
 // Check License
-app.post('/check', async (req, res) => {
+app.post('/check', checkLimiter, async (req, res) => {
 
     try {
 
-        const { license_key, device_id } = req.body;
+        const { license_key, device_id, hardware_fingerprint } = req.body;
 
-        if (!license_key || !device_id) {
+        if (
+            !isValidLicenseInput(license_key, 100) ||
+            !isValidLicenseInput(device_id, 200) ||
+            !isValidLicenseInput(hardware_fingerprint, 128)
+        ) {
             return res.status(400).json({
                 success: false,
                 valid: false,
-                message: 'License key and device ID are required'
+                message: 'Invalid license request data'
             });
         }
 
@@ -223,9 +344,10 @@ app.post('/check', async (req, res) => {
         // Check device
         const { data: device, error: deviceError } = await supabase
             .from('license_devices')
-            .select('*')
+            .select('id')
             .eq('license_id', license.id)
             .eq('device_id', device_id)
+            .eq('hardware_fingerprint', hardware_fingerprint)
             .eq('is_active', true)
             .maybeSingle();
 
@@ -261,28 +383,31 @@ app.post('/check', async (req, res) => {
         });
 
     } catch (err) {
-
-        return res.status(500).json({
-            success: false,
-            valid: false,
-            message: err.message
-        });
-
+    console.error('CHECK ERROR:', err);
+    return res.status(500).json({
+        success: false,
+        valid: false,
+        message: 'Server error'
+    });
     }
 });
 
 
 // Deactivate License Device
-app.post('/deactivate', async (req, res) => {
+app.post('/deactivate', deactivateLimiter, async (req, res) => {
 
     try {
 
-        const { license_key, device_id } = req.body;
+        const { license_key, device_id, hardware_fingerprint } = req.body;
 
-        if (!license_key || !device_id) {
+        if (
+            !isValidLicenseInput(license_key, 100) ||
+            !isValidLicenseInput(device_id, 200) ||
+            !isValidLicenseInput(hardware_fingerprint, 128)
+        ) {
             return res.status(400).json({
                 success: false,
-                message: 'License key and device ID are required'
+                message: 'Invalid license request data'
             });
         }
 
@@ -306,13 +431,16 @@ app.post('/deactivate', async (req, res) => {
             .select('id')
             .eq('license_id', license.id)
             .eq('device_id', device_id)
+            .eq('hardware_fingerprint', hardware_fingerprint)
             .eq('is_active', true)
             .maybeSingle();
 
         if (deviceError) {
+            console.error('DEACTIVATE DEVICE ERROR:', deviceError);
+
             return res.status(500).json({
                 success: false,
-                message: deviceError.message
+                message: 'Unable to verify activation'
             });
         }
 
@@ -333,9 +461,11 @@ app.post('/deactivate', async (req, res) => {
             .eq('id', device.id);
 
         if (updateError) {
+            console.error('DEACTIVATE UPDATE ERROR:', updateError);
+
             return res.status(500).json({
                 success: false,
-                message: updateError.message
+                message: 'Unable to deactivate license'
             });
         }
 
@@ -346,11 +476,12 @@ app.post('/deactivate', async (req, res) => {
 
     } catch (err) {
 
-        return res.status(500).json({
-            success: false,
-            message: err.message
-        });
+    console.error('DEACTIVATE ERROR:', err);
 
+    return res.status(500).json({
+        success: false,
+        message: 'Server error'
+    });
     }
 });
 

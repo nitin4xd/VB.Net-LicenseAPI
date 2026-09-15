@@ -1,10 +1,12 @@
 require('dotenv').config();
 
+const helmet = require('helmet');
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-
+app.use(helmet());
 app.use(express.json());
 
 const supabase = createClient(

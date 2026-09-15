@@ -46,7 +46,6 @@ const deactivateLimiter = rateLimit({
     legacyHeaders: false
 });
 
-
 const checkLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,
@@ -58,6 +57,11 @@ const checkLimiter = rateLimit({
     standardHeaders: true,
     legacyHeaders: false
 });
+
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
+    console.error('Missing Supabase environment variables');
+    process.exit(1);
+}
 
 const supabase = createClient(
     process.env.SUPABASE_URL,

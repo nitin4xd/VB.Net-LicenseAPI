@@ -17,35 +17,6 @@ app.get('/', (req, res) => {
     res.send('License API is working!');
 });
 
-// Test Supabase
-app.get('/test-license', async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('licenses')
-            .select('license_key, customer_name, status, expiry_date')
-            .eq('license_key', 'LP-TEST-2026-0001')
-            .single();
-
-        if (error) {
-            return res.status(500).json({
-                success: false,
-                error: error.message
-            });
-        }
-
-        res.json({
-            success: true,
-            license: data
-        });
-
-    } catch (err) {
-        res.status(500).json({
-            success: false,
-            error: err.message
-        });
-    }
-});
-
 // Activate License
 app.post('/activate', async (req, res) => {
 

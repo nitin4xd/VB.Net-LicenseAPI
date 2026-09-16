@@ -46,6 +46,7 @@ const deactivateLimiter = rateLimit({
     legacyHeaders: false
 });
 
+
 const checkLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 60,
@@ -58,10 +59,12 @@ const checkLimiter = rateLimit({
     legacyHeaders: false
 });
 
+
 if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SECRET_KEY) {
     console.error('Missing Supabase environment variables');
     process.exit(1);
 }
+
 
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -211,8 +214,7 @@ return res.json({
 const { count: activeDeviceCount, error: countError } = await supabase
     .from('license_devices')
     .select('*', { count: 'exact', head: true })
-    .eq('license_id', license.id)
-    .eq('is_active', true);
+    .eq('license_id', license.id);
 
 if (countError) {
     console.error('DEVICE COUNT ERROR:', countError);
@@ -303,7 +305,7 @@ app.post('/check', checkLimiter, async (req, res) => {
         // Find license
         const { data: license, error: licenseError } = await supabase
             .from('licenses')
-            .select('*')
+            .select('id, license_key, status, expiry_date, customer_name')
             .eq('license_key', license_key)
             .single();
 

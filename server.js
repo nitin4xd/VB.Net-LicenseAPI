@@ -30,8 +30,13 @@ function normalize(value) {
 function normalizeSection(value) {
     const section = normalize(value).toLowerCase();
 
+    // Keep all existing software sections working and add Accounting.
+    // Section matching remains case-insensitive, while the canonical
+    // values below are used for comparison with the license record.
     if (section === "broker") return "Broker";
     if (section === "lewal") return "Lewal";
+    if (section === "dewal") return "Dewal";
+    if (section === "accounting") return "Accounting";
 
     return "";
 }
